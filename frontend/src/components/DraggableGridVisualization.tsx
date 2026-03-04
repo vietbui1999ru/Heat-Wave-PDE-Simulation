@@ -6,7 +6,7 @@
  * Supports 2x2 grid layout with dynamic position management.
  */
 
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useCallback } from 'react';
 import VisualizationCanvas, { VisualizationMode } from './VisualizationCanvas';
 import Trajectory3DVisualization from './Trajectory3DVisualization';
 import Partial3DSolution from './Partial3DSolution';
@@ -147,84 +147,86 @@ export const DraggableGridVisualization: React.FC<DraggableGridVisualizationProp
   };
 
   // Get closest grid cell based on mouse position (3x2 grid = 3 columns, 2 rows)
-  const getClosestGridPosition = (clientX: number, clientY: number): PanelPosition | null => {
-    if (!gridRef.current) return null;
+  const getClosestGridPosition = useCallback(
+    (clientX: number, clientY: number): PanelPosition | null => {
+      if (!gridRef.current) return null;
 
-    const gridRect = gridRef.current.getBoundingClientRect();
-    const relX = clientX - gridRect.left;
-    const relY = clientY - gridRect.top;
+      const gridRect = gridRef.current.getBoundingClientRect();
+      const relX = clientX - gridRect.left;
+      const relY = clientY - gridRect.top;
 
-    // Determine which row (2 rows)
-    const rowThreshold = gridRect.height / 2;
-    const row = relY < rowThreshold ? 1 : 2;
+      const rowThreshold = gridRect.height / 2;
+      const row = relY < rowThreshold ? 1 : 2;
 
-    // Determine which column (3 columns)
-    const colThreshold1 = gridRect.width / 3;
-    const colThreshold2 = (gridRect.width * 2) / 3;
-    let col = 1;
-    if (relX >= colThreshold2) {
-      col = 3;
-    } else if (relX >= colThreshold1) {
-      col = 2;
-    }
+      const colThreshold1 = gridRect.width / 3;
+      const colThreshold2 = (gridRect.width * 2) / 3;
+      let col = 1;
+      if (relX >= colThreshold2) {
+        col = 3;
+      } else if (relX >= colThreshold1) {
+        col = 2;
+      }
 
-    return (`r${row}c${col}` as PanelPosition);
-  };
+      return `r${row}c${col}` as PanelPosition;
+    },
+    [] // gridRef is stable
+  );
 
   // Swap panels between positions
-  const swapPanels = (fromPosition: PanelPosition, toPosition: PanelPosition) => {
-    const fromPanel = panels.find(p => p.position === fromPosition);
-    const toPanel = panels.find(p => p.position === toPosition);
-
-    if (!fromPanel || !toPanel) return;
-
-    setPanels(
-      panels.map(panel => {
-        if (panel.id === fromPanel.id) {
-          return { ...panel, position: toPosition, isDragging: false };
-        }
-        if (panel.id === toPanel.id) {
-          return { ...panel, position: fromPosition };
-        }
-        return panel;
-      })
-    );
-  };
+  const swapPanels = useCallback(
+    (fromPosition: PanelPosition, toPosition: PanelPosition) => {
+      setPanels(prev => {
+        const fromPanel = prev.find(p => p.position === fromPosition);
+        const toPanel = prev.find(p => p.position === toPosition);
+        if (!fromPanel || !toPanel) return prev;
+        return prev.map(panel => {
+          if (panel.id === fromPanel.id) return { ...panel, position: toPosition, isDragging: false };
+          if (panel.id === toPanel.id) return { ...panel, position: fromPosition };
+          return panel;
+        });
+      });
+    },
+    []
+  );
 
   // Handle panel drag start
-  const handleDragStart = (e: React.DragEvent<HTMLDivElement>, panelId: string) => {
-    const panel = panels.find(p => p.id === panelId);
-    if (!panel) return;
-
-    draggedPanelRef.current = panel;
-    e.dataTransfer.effectAllowed = 'move';
-    e.dataTransfer.setData('panelId', panelId);
-  };
+  const handleDragStart = useCallback(
+    (e: React.DragEvent<HTMLDivElement>, panelId: string) => {
+      const panel = panels.find(p => p.id === panelId);
+      if (!panel) return;
+      draggedPanelRef.current = panel;
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('panelId', panelId);
+    },
+    [panels]
+  );
 
   // Handle drag over grid
-  const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+  const handleDragOver = useCallback((e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
-  };
+  }, []);
 
   // Handle drop
-  const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
+  const handleDrop = useCallback(
+    (e: React.DragEvent<HTMLDivElement>) => {
+      e.preventDefault();
 
-    const panelId = e.dataTransfer.getData('panelId');
-    const draggedPanel = panels.find(p => p.id === panelId);
+      const panelId = e.dataTransfer.getData('panelId');
+      const draggedPanel = panels.find(p => p.id === panelId);
+      if (!draggedPanel) return;
 
-    if (!draggedPanel) return;
+      const targetPosition = getClosestGridPosition(e.clientX, e.clientY);
+      if (!targetPosition) return;
 
-    const targetPosition = getClosestGridPosition(e.clientX, e.clientY);
-    if (!targetPosition) return;
+      if (draggedPanel.position !== targetPosition) {
+        swapPanels(draggedPanel.position, targetPosition);
+      }
 
-    if (draggedPanel.position !== targetPosition) {
-      swapPanels(draggedPanel.position, targetPosition);
-    }
-
-    draggedPanelRef.current = null;
-  };
+      draggedPanelRef.current = null;
+    },
+    [panels, getClosestGridPosition, swapPanels]
+  );
 
   // Render individual panel with support for different 3D visualization types
   const renderPanel = (position: PanelPosition) => {

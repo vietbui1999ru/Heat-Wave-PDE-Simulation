@@ -6,10 +6,10 @@
  * Useful for understanding solution dynamics and evolution patterns.
  */
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useMemo } from 'react';
 import Plotly from 'plotly.js-dist-min';
 import { SimulationData, EquationType } from '../types/simulation';
-import { getOptimizedPlotlyConfig, getOptimizedLayout } from '../utils/visualizationOptimizations';
+import { BASE_PLOTLY_CONFIG, make3DLayout } from '../utils/plotlyConfig';
 
 interface Trajectory3DVisualizationProps {
   /** All simulation data for trajectory construction */
@@ -77,7 +77,19 @@ export const Trajectory3DVisualization: React.FC<Trajectory3DVisualizationProps>
   samplingRate = 1
 }) => {
   const plotContainerRef = useRef<HTMLDivElement>(null);
-  const [isInitialized, setIsInitialized] = useState(false);
+  const isInitializedRef = useRef(false);
+
+  const layout = useMemo(
+    () =>
+      make3DLayout(
+        title || `${equationType.toUpperCase()} - 3D Trajectory Paths (Temporal Evolution)`,
+        'Position (x)',
+        'Time (t)',
+        'Solution u(x,t)',
+        showGrid
+      ),
+    [title, equationType, showGrid]
+  );
 
   /**
    * Build trajectory traces from simulation data
@@ -105,7 +117,7 @@ export const Trajectory3DVisualization: React.FC<Trajectory3DVisualizationProps>
       const colorValues: number[] = [];
 
       // Collect time evolution for this spatial point
-      allData.forEach((dataPoint, tIdx) => {
+      allData.forEach((dataPoint) => {
         x.push(xValues[xIdx]);
         y.push(dataPoint.time_value);
         z.push(dataPoint.u_values[xIdx]);
@@ -151,84 +163,18 @@ export const Trajectory3DVisualization: React.FC<Trajectory3DVisualizationProps>
    * Render 3D trajectory visualization
    */
   const renderTrajectory = () => {
-    if (!plotContainerRef.current || allData.length < 2) {
-      return;
-    }
+    if (!plotContainerRef.current || allData.length < 2) return;
 
     const traces = buildTrajectoryTraces();
-    if (traces.length === 0) {
-      return;
-    }
+    if (traces.length === 0) return;
 
-    // Layout configuration
-    const baseLayout: Partial<Plotly.Layout> = {
-      title: {
-        text:
-          title ||
-          `${equationType.toUpperCase()} - 3D Trajectory Paths (Temporal Evolution)`,
-        font: { color: '#e0e0e0', size: 14 }
-      },
-      scene: {
-        xaxis: {
-          title: 'Position (x)',
-          gridcolor: showGrid ? '#444' : 'transparent',
-          color: '#e0e0e0',
-          backgroundcolor: '#1a1a1a'
-        },
-        yaxis: {
-          title: 'Time (t)',
-          gridcolor: showGrid ? '#444' : 'transparent',
-          color: '#e0e0e0',
-          backgroundcolor: '#1a1a1a'
-        },
-        zaxis: {
-          title: 'Solution u(x,t)',
-          gridcolor: showGrid ? '#444' : 'transparent',
-          color: '#e0e0e0',
-          backgroundcolor: '#1a1a1a'
-        },
-        bgcolor: '#1a1a1a',
-        camera: {
-          eye: { x: 1.5, y: 1.5, z: 1.2 }
-        }
-      },
-      paper_bgcolor: '#1a1a1a',
-      plot_bgcolor: '#1a1a1a',
-      font: { color: '#e0e0e0' },
-      margin: { l: 0, r: 0, t: 50, b: 0 },
-      showlegend: false
-    };
-
-    const layout = getOptimizedLayout(baseLayout, {
-      renderMode: 'webgl',
-      enableVirtualWebGL: false,
-      scatterGLMode: true,
-      heatmapGLMode: false,
-      disableAnimations: false,
-      reduceDataPoints: false,
-      maxDataPoints: 1000000,
-      enableBuffering: true
-    });
-
-    const config = getOptimizedPlotlyConfig({
-      renderMode: 'webgl',
-      enableVirtualWebGL: false,
-      scatterGLMode: true,
-      heatmapGLMode: false,
-      disableAnimations: false,
-      reduceDataPoints: false,
-      maxDataPoints: 1000000,
-      enableBuffering: true
-    });
-
-    // Create or update the plot
-    if (isInitialized) {
-      Plotly.react(plotContainerRef.current, traces, layout, config);
+    const el = plotContainerRef.current;
+    if (isInitializedRef.current) {
+      Plotly.react(el, traces, { ...layout, showlegend: false }, BASE_PLOTLY_CONFIG);
     } else {
-      Plotly.newPlot(plotContainerRef.current, traces, layout, config);
+      Plotly.newPlot(el, traces, { ...layout, showlegend: false }, BASE_PLOTLY_CONFIG);
+      isInitializedRef.current = true;
     }
-
-    setIsInitialized(true);
   };
 
   // Render when data changes
@@ -238,9 +184,10 @@ export const Trajectory3DVisualization: React.FC<Trajectory3DVisualizationProps>
     return () => {
       if (plotContainerRef.current) {
         Plotly.purge(plotContainerRef.current);
+        isInitializedRef.current = false;
       }
     };
-  }, [allData, equationType, globalMin, globalMax, colorScheme, showGrid, samplingRate]);
+  }, [allData, equationType, globalMin, globalMax, colorScheme, showGrid, samplingRate, layout]);
 
   if (allData.length < 2) {
     return (

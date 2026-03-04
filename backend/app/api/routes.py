@@ -1,16 +1,14 @@
 """
 REST API routes for simulation configuration and control.
 """
+import uuid
+
 from fastapi import APIRouter, HTTPException
 from typing import Dict, Any
 
-from app.models.schemas import (
-    SimulationConfig,
-    SimulationResponse,
-    ValidateConfigRequest,
-    CompleteSolutionResponse
-)
+from app.models.schemas import SimulationConfig, SimulationResponse, CompleteSolutionResponse
 from app.services import simulation_service
+from app.presets.simulation_presets import PRESETS
 
 router = APIRouter()
 
@@ -58,7 +56,6 @@ async def solve_simulation(config: SimulationConfig):
         raise HTTPException(status_code=500, detail=f"Simulation computation failed: {str(e)}")
 
     # Generate simulation ID for response
-    import uuid
     simulation_id = str(uuid.uuid4())
 
     # Build response
@@ -99,5 +96,4 @@ async def get_presets():
     """
     Get predefined simulation configurations.
     """
-    from app.presets.simulation_presets import PRESETS
     return PRESETS

@@ -9,10 +9,10 @@
  * Useful for seeing temporal evolution in a compact 3D view.
  */
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useMemo } from 'react';
 import Plotly from 'plotly.js-dist-min';
 import { SimulationData, EquationType } from '../types/simulation';
-import { getOptimizedPlotlyConfig, getOptimizedLayout } from '../utils/visualizationOptimizations';
+import { BASE_PLOTLY_CONFIG, make3DLayout } from '../utils/plotlyConfig';
 
 interface Partial3DSolutionProps {
   /** All simulation data (for time slicing) */
@@ -76,38 +76,37 @@ export const Partial3DSolution: React.FC<Partial3DSolutionProps> = ({
   title
 }) => {
   const plotContainerRef = useRef<HTMLDivElement>(null);
-  const [isInitialized, setIsInitialized] = useState(false);
+  const isInitializedRef = useRef(false);
+
+  // Memoize the base layout; title will be overridden per frame with currentTimeIndex
+  const baseLayout = useMemo(
+    () =>
+      make3DLayout(
+        '',  // set dynamically in renderPartial3DSolution
+        'Position (x)',
+        'Time (t)',
+        'Solution u(x,t)',
+        showGrid
+      ),
+    [showGrid]
+  );
 
   /**
    * Render partial 3D solution
    */
   const renderPartial3DSolution = () => {
-    if (!plotContainerRef.current || allData.length === 0) {
-      return;
-    }
+    if (!plotContainerRef.current || allData.length === 0) return;
 
-    // Calculate time window bounds
     const startIdx = Math.max(0, currentTimeIndex - timeSliceSize);
     const endIdx = Math.min(allData.length - 1, currentTimeIndex + timeSliceSize);
 
-    // Extract data for the time slice
     const timeSliceData = allData.slice(startIdx, endIdx + 1);
-    if (timeSliceData.length < 2) {
-      return; // Need at least 2 time steps for a surface
-    }
+    if (timeSliceData.length < 2) return;
 
-    // Build z-matrix (u values over x and t)
-    const zMatrix: number[][] = [];
     const xValues = timeSliceData[0].x_values;
-    const tValues: number[] = [];
-    const baseTime = allData[startIdx].time_value;
+    const tValues = timeSliceData.map(d => d.time_value);
+    const zMatrix = timeSliceData.map(d => d.u_values);
 
-    timeSliceData.forEach(dataPoint => {
-      tValues.push(dataPoint.time_value);
-      zMatrix.push(dataPoint.u_values);
-    });
-
-    // Prepare data for Plotly
     const trace: Partial<Plotly.PlotData> = {
       x: xValues,
       y: tValues,
@@ -120,79 +119,27 @@ export const Partial3DSolution: React.FC<Partial3DSolutionProps> = ({
         titleside: 'right',
         tickfont: { color: '#e0e0e0' }
       },
-      // Fixed color scale for consistent visualization
       zmin: globalMin,
       zmax: globalMax
     };
 
-    // Layout configuration
-    const baseLayout: Partial<Plotly.Layout> = {
+    const layout: Partial<Plotly.Layout> = {
+      ...baseLayout,
       title: {
         text:
           title ||
           `${equationType.toUpperCase()} - Partial 3D Solution (t = ${allData[currentTimeIndex].time_value.toFixed(4)})`,
         font: { color: '#e0e0e0', size: 16 }
-      },
-      scene: {
-        xaxis: {
-          title: 'Position (x)',
-          gridcolor: showGrid ? '#444' : 'transparent',
-          color: '#e0e0e0',
-          backgroundcolor: '#1a1a1a'
-        },
-        yaxis: {
-          title: 'Time (t)',
-          gridcolor: showGrid ? '#444' : 'transparent',
-          color: '#e0e0e0',
-          backgroundcolor: '#1a1a1a'
-        },
-        zaxis: {
-          title: 'Solution u(x,t)',
-          gridcolor: showGrid ? '#444' : 'transparent',
-          color: '#e0e0e0',
-          backgroundcolor: '#1a1a1a'
-        },
-        bgcolor: '#1a1a1a',
-        camera: {
-          eye: { x: 1.5, y: 1.5, z: 1.2 }
-        }
-      },
-      paper_bgcolor: '#1a1a1a',
-      plot_bgcolor: '#1a1a1a',
-      font: { color: '#e0e0e0' },
-      margin: { l: 0, r: 0, t: 60, b: 0 }
+      }
     };
 
-    const layout = getOptimizedLayout(baseLayout, {
-      renderMode: 'webgl',
-      enableVirtualWebGL: false,
-      scatterGLMode: true,
-      heatmapGLMode: true,
-      disableAnimations: false,
-      reduceDataPoints: false,
-      maxDataPoints: 100000,
-      enableBuffering: true
-    });
-
-    const config = getOptimizedPlotlyConfig({
-      renderMode: 'webgl',
-      enableVirtualWebGL: false,
-      scatterGLMode: true,
-      heatmapGLMode: true,
-      disableAnimations: false,
-      reduceDataPoints: false,
-      maxDataPoints: 100000,
-      enableBuffering: true
-    });
-
-    // Create or update the plot
-    if (isInitialized) {
-      Plotly.react(plotContainerRef.current, [trace], layout, config);
+    const el = plotContainerRef.current;
+    if (isInitializedRef.current) {
+      Plotly.react(el, [trace], layout, BASE_PLOTLY_CONFIG);
     } else {
-      Plotly.newPlot(plotContainerRef.current, [trace], layout, config);
+      Plotly.newPlot(el, [trace], layout, BASE_PLOTLY_CONFIG);
+      isInitializedRef.current = true;
     }
-
-    setIsInitialized(true);
   };
 
   // Render when data or current time changes
@@ -202,9 +149,10 @@ export const Partial3DSolution: React.FC<Partial3DSolutionProps> = ({
     return () => {
       if (plotContainerRef.current) {
         Plotly.purge(plotContainerRef.current);
+        isInitializedRef.current = false;
       }
     };
-  }, [currentTimeIndex, allData, equationType, globalMin, globalMax, timeSliceSize]);
+  }, [currentTimeIndex, allData, equationType, globalMin, globalMax, timeSliceSize, baseLayout]);
 
   if (allData.length < 2) {
     return (

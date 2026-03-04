@@ -1,10 +1,21 @@
 """
 WebSocket handlers for real-time simulation streaming.
+
+DEPRECATED / LEGACY
+-------------------
+This module implements the original WebSocket-based streaming architecture
+where the backend streamed one frame at a time to the client at ~50 fps.
+
+It has been superseded by the REST + client-side playback approach:
+  POST /api/simulations/solve  →  returns the full solution in one response
+  Frontend uses requestAnimationFrame for smooth, controllable playback.
+
+These endpoints are kept for backwards compatibility but should not be used
+for new features.  They may be removed in a future release.
 """
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from typing import Dict
 import json
-import asyncio
 
 from app.services import simulation_service
 
@@ -17,7 +28,9 @@ active_connections: Dict[str, WebSocket] = {}
 @router.websocket("/ws/simulation/{simulation_id}")
 async def simulation_websocket(websocket: WebSocket, simulation_id: str):
     """
-    WebSocket endpoint for streaming simulation results.
+    [LEGACY] WebSocket endpoint for streaming simulation results frame-by-frame.
+
+    Prefer POST /api/simulations/solve for new integrations.
 
     Args:
         websocket: WebSocket connection
@@ -31,7 +44,9 @@ async def simulation_websocket(websocket: WebSocket, simulation_id: str):
         await websocket.send_json({
             "type": "connected",
             "simulation_id": simulation_id,
-            "message": "WebSocket connection established"
+            "message": "WebSocket connection established",
+            "deprecated": True,
+            "note": "Use POST /api/simulations/solve for client-side playback."
         })
 
         # Listen for client messages (start, pause, stop commands)
@@ -69,7 +84,6 @@ async def simulation_websocket(websocket: WebSocket, simulation_id: str):
                 })
 
             elif message.get("command") == "pause":
-                # Pause simulation
                 simulation_service.pause_simulation(simulation_id)
                 await websocket.send_json({
                     "type": "status",
@@ -78,7 +92,6 @@ async def simulation_websocket(websocket: WebSocket, simulation_id: str):
                 })
 
             elif message.get("command") == "resume":
-                # Resume simulation
                 simulation_service.resume_simulation(simulation_id)
                 await websocket.send_json({
                     "type": "status",
@@ -87,7 +100,6 @@ async def simulation_websocket(websocket: WebSocket, simulation_id: str):
                 })
 
             elif message.get("command") == "stop":
-                # Stop simulation
                 simulation_service.stop_simulation(simulation_id)
                 break
 
@@ -107,7 +119,7 @@ async def simulation_websocket(websocket: WebSocket, simulation_id: str):
 @router.websocket("/ws/health")
 async def health_websocket(websocket: WebSocket):
     """
-    Health check WebSocket endpoint.
+    [LEGACY] Health check WebSocket endpoint.
     """
     await websocket.accept()
     await websocket.send_json({"status": "healthy"})

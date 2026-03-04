@@ -8,7 +8,6 @@ import numpy as np
 from .heat_equation_solver import HeatEquationSolver
 from .wave_equation_solver import WaveEquationSolver
 from .stability_validator import StabilityValidator
-from .boundary_condition_manager import BoundaryConditionManager
 from .initial_condition_manager import InitialConditionManager
 
 
@@ -30,7 +29,6 @@ class PDESimulator:
 
         # Initialize components
         self.stability_validator = StabilityValidator()
-        self.boundary_manager = BoundaryConditionManager()
         self.initial_manager = InitialConditionManager()
 
         # Initialize appropriate solver

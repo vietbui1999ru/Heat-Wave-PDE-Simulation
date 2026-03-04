@@ -1,12 +1,4 @@
-/**
- * Main Application Component
- *
- * Root component that manages the entire PDE simulation platform.
- * Now uses client-side playback control with REST API pre-computed solutions.
- * Handles state management, animation loop, and orchestrates all child components.
- */
-
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import './styles/App.css';
 import {
   SimulationConfig,
@@ -15,9 +7,9 @@ import {
   EquationType,
   BoundaryConditionType,
   InitialConditionType,
-  CompleteSolution
 } from './types/simulation';
-import { solveSimulation, validateConfiguration } from './services/api';
+import { usePlayback } from './hooks/usePlayback';
+import { useSimulation } from './hooks/useSimulation';
 import ParameterPanel from './components/ParameterPanel';
 import VisualizationCanvas, { VisualizationMode } from './components/VisualizationCanvas';
 import DraggableGridVisualization from './components/DraggableGridVisualization';
@@ -32,404 +24,135 @@ import {
   getRecommendedPreset
 } from './utils/visualizationOptimizations';
 
-/**
- * Default simulation configuration
- * Used as initial state and for reset operations
- */
 const DEFAULT_CONFIG: SimulationConfig = {
   equation_type: EquationType.HEAT,
-  spatial_domain: {
-    x_min: 0.0,
-    x_max: 1.0,
-    dx: 0.01
-  },
-  temporal_domain: {
-    t_min: 0.0,
-    t_max: 1.0,
-    dt: 0.001
-  },
-  boundary_condition: {
-    type: BoundaryConditionType.DIRICHLET,
-    left_value: 0.0,
-    right_value: 0.0
-  },
-  initial_condition: {
-    type: InitialConditionType.SINE,
-    parameters: {
-      amplitude: 1.0,
-      frequency: 1.0
-    }
-  },
-  physical_parameters: {
-    beta: 1.0
-  }
+  spatial_domain: { x_min: 0.0, x_max: 1.0, dx: 0.01 },
+  temporal_domain: { t_min: 0.0, t_max: 1.0, dt: 0.001 },
+  boundary_condition: { type: BoundaryConditionType.DIRICHLET, left_value: 0.0, right_value: 0.0 },
+  initial_condition: { type: InitialConditionType.SINE, parameters: { amplitude: 1.0, frequency: 1.0 } },
+  physical_parameters: { beta: 1.0 }
 };
 
-/**
- * Main App Component
- *
- * Central hub of the application that:
- * - Manages global state (complete solution, current frame, playback state)
- * - Coordinates REST API communication
- * - Implements client-side animation loop with requestAnimationFrame
- * - Handles playback controls (play/pause/reset/seek/speed)
- * - Orchestrates UI components
- *
- * Architecture: REST + Client-Side Playback
- * - Backend computes complete solution once via /api/simulations/solve
- * - Frontend stores full solution in state
- * - Animation loop uses requestAnimationFrame for smooth 50 fps playback
- * - All controls (play/pause/reset/seek) handled client-side
- * - Fixed axes prevent "jumping" during animation
- *
- * @example
- * ```tsx
- * ReactDOM.render(<App />, document.getElementById('root'));
- * ```
- */
+const MemoizedVisualizationCanvas = React.memo(VisualizationCanvas);
+const MemoizedParameterPanel = React.memo(ParameterPanel);
+const MemoizedSimulationControls = React.memo(SimulationControls);
+
 export const App: React.FC = () => {
-  // ============================================================
-  // STATE MANAGEMENT
-  // ============================================================
-
-  /** Current simulation configuration */
   const [config, setConfig] = useState<SimulationConfig>(DEFAULT_CONFIG);
-
-  /** Complete pre-computed solution (null if not solved yet) */
-  const [completeSolution, setCompleteSolution] = useState<CompleteSolution | null>(null);
-
-  /** Current time step index being displayed */
-  const [currentTimeIndex, setCurrentTimeIndex] = useState<number>(0);
-
-  /** Whether animation is currently playing */
-  const [isPlaying, setIsPlaying] = useState<boolean>(false);
-
-  /** Whether computation is in progress */
-  const [isComputing, setIsComputing] = useState<boolean>(false);
-
-  /** Current simulation status */
-  const [status, setStatus] = useState<SimulationStatus>(SimulationStatus.IDLE);
-
-  /** Error message (if any) */
-  const [error, setError] = useState<string | null>(null);
-
-  /** Visualization mode */
   const [vizMode, setVizMode] = useState<VisualizationMode>(VisualizationMode.LINE_2D);
+  const [hasValidationErrors, setHasValidationErrors] = useState(false);
 
-  /** Playback speed multiplier (1.0 = 50 fps baseline) */
-  const [playbackSpeed, setPlaybackSpeed] = useState<number>(1.0);
+  const simulation = useSimulation();
+  const { completeSolution, isComputing, status, error } = simulation;
 
-  /** Whether there are validation errors in parameter panel */
-  const [hasValidationErrors, setHasValidationErrors] = useState<boolean>(false);
+  const playback = usePlayback({ completeSolution });
+  const { currentTimeIndex, playbackSpeed } = playback;
 
-  /** Reference to animation frame ID for cleanup */
-  const animationFrameRef = useRef<number | null>(null);
+  // Computed values
+  const currentData: SimulationData | null = useMemo(() => {
+    if (!completeSolution) return null;
+    return {
+      simulation_id: completeSolution.simulation_id,
+      time_index: currentTimeIndex,
+      time_value: completeSolution.t_values[currentTimeIndex],
+      x_values: completeSolution.x_values,
+      u_values: completeSolution.u_values[currentTimeIndex]
+    };
+  }, [completeSolution, currentTimeIndex]);
 
-  /** Reference to last frame timestamp for FPS control */
-  const lastFrameTimeRef = useRef<number>(0);
+  const allData: SimulationData[] = useMemo(() => {
+    if (!completeSolution) return [];
+    return completeSolution.u_values.map((u_vals, timeIdx) => ({
+      simulation_id: completeSolution.simulation_id,
+      time_index: timeIdx,
+      time_value: completeSolution.t_values[timeIdx],
+      x_values: completeSolution.x_values,
+      u_values: u_vals
+    }));
+  }, [completeSolution]);
 
-  // ============================================================
-  // COMPUTED VALUES
-  // ============================================================
-
-  /** Current data frame extracted from complete solution */
-  const currentData: SimulationData | null = completeSolution
-    ? {
-        simulation_id: completeSolution.simulation_id,
-        time_index: currentTimeIndex,
-        time_value: completeSolution.t_values[currentTimeIndex],
-        x_values: completeSolution.x_values,
-        u_values: completeSolution.u_values[currentTimeIndex]
-      }
-    : null;
-
-  /** All data for 3D/heatmap visualization */
-  const allData: SimulationData[] = completeSolution
-    ? completeSolution.u_values.map((u_vals, timeIdx) => ({
-        simulation_id: completeSolution.simulation_id,
-        time_index: timeIdx,
-        time_value: completeSolution.t_values[timeIdx],
-        x_values: completeSolution.x_values,
-        u_values: u_vals
-      }))
-    : [];
-
-  /** Total number of time steps */
   const totalTimeSteps = completeSolution?.metadata.nt || 0;
-
-  /** Current time value */
   const currentTime = currentData?.time_value || 0;
-
-  /** Maximum time value */
   const maxTime = config.temporal_domain.t_max;
+  const hasSolution = completeSolution !== null;
 
-  // ============================================================
-  // LIFECYCLE HOOKS
-  // ============================================================
-
-  /**
-   * Animation loop using requestAnimationFrame
-   * Controls smooth playback at target frame rate with variable speed
-   */
-  useEffect(() => {
-    if (!isPlaying || !completeSolution) {
-      return;
-    }
-
-    const animate = (timestamp: number) => {
-      // Initialize lastFrameTime on first call
-      if (lastFrameTimeRef.current === 0) {
-        lastFrameTimeRef.current = timestamp;
-      }
-
-      const elapsed = timestamp - lastFrameTimeRef.current;
-      const targetFrameTime = 20 / playbackSpeed;  // 50 fps baseline (20ms per frame)
-
-      // Advance frame if enough time has elapsed
-      if (elapsed >= targetFrameTime) {
-        setCurrentTimeIndex(prev => {
-          // Stop at end of animation
-          if (prev >= completeSolution.metadata.nt - 1) {
-            setIsPlaying(false);
-            return prev;
-          }
-          return prev + 1;
-        });
-        lastFrameTimeRef.current = timestamp;
-      }
-
-      // Continue animation loop
-      if (isPlaying) {
-        animationFrameRef.current = requestAnimationFrame(animate);
-      }
-    };
-
-    // Start animation loop
-    animationFrameRef.current = requestAnimationFrame(animate);
-
-    // Cleanup: cancel animation frame on unmount or state change
-    return () => {
-      if (animationFrameRef.current) {
-        cancelAnimationFrame(animationFrameRef.current);
-        lastFrameTimeRef.current = 0;
-      }
-    };
-  }, [isPlaying, playbackSpeed, completeSolution]);
-
-  /**
-   * Cleanup on component unmount
-   */
-  useEffect(() => {
-    return () => {
-      if (animationFrameRef.current) {
-        cancelAnimationFrame(animationFrameRef.current);
-      }
-    };
-  }, []);
-
-  /**
-   * Initialize GPU acceleration and Virtual WebGL support
-   * Detects if we need Virtual WebGL and loads it from CDN
-   */
+  // GPU initialization
   useEffect(() => {
     const initGPUAcceleration = async () => {
-      const config = getRecommendedPreset();
-      logOptimizationSettings(config);
-
-      // Check if we need Virtual WebGL (for grid mode with multiple plots)
-      if (vizMode === VisualizationMode.GRID) {
-        if (wouldExceedWebGLLimit(4)) {
-          console.log('⚠️ Initializing Virtual WebGL to support multiple WebGL plots');
-          try {
-            await initializeVirtualWebGL();
-          } catch (err) {
-            console.warn('Virtual WebGL initialization failed, falling back to standard rendering');
-          }
+      const gpuConfig = getRecommendedPreset();
+      logOptimizationSettings(gpuConfig);
+      if (vizMode === VisualizationMode.GRID && wouldExceedWebGLLimit(4)) {
+        try {
+          await initializeVirtualWebGL();
+        } catch {
+          console.warn('Virtual WebGL initialization failed, falling back to standard rendering');
         }
       }
     };
-
     initGPUAcceleration();
   }, [vizMode]);
 
-  // ============================================================
-  // SIMULATION LIFECYCLE HANDLERS
-  // ============================================================
+  // Handlers
+  const handleApplyConfiguration = useCallback(async () => {
+    playback.pause();
+    playback.reset();
+    await simulation.solve(config);
+  }, [config, simulation, playback]);
 
-  /**
-   * Applies the current configuration and computes complete solution
-   * Validates config, calls /api/simulations/solve, stores full solution
-   */
-  const handleApplyConfiguration = async () => {
-    try {
-      setIsComputing(true);
-      setError(null);
-      setStatus(SimulationStatus.RUNNING);
+  const handlePlay = useCallback(() => {
+    playback.play();
+    simulation.setStatus(SimulationStatus.RUNNING);
+  }, [playback, simulation]);
 
-      // Validate configuration
-      console.log('[App] Validating configuration...');
-      const validationResult = await validateConfiguration(config);
+  const handlePause = useCallback(() => {
+    playback.pause();
+    simulation.setStatus(SimulationStatus.PAUSED);
+  }, [playback, simulation]);
 
-      if (!validationResult.success || !validationResult.data?.valid) {
-        const errors = validationResult.data?.errors || ['Validation failed'];
-        setError(errors.join('\n'));
-        setIsComputing(false);
-        setStatus(SimulationStatus.ERROR);
-        return;
-      }
+  const handleReset = useCallback(() => {
+    playback.reset();
+    simulation.setStatus(SimulationStatus.COMPLETED);
+  }, [playback, simulation]);
 
-      // Solve complete simulation
-      console.log('[App] Solving simulation...');
-      const solveResult = await solveSimulation(config);
+  const handleSeek = useCallback((timeIndex: number) => {
+    playback.seek(timeIndex);
+  }, [playback]);
 
-      if (!solveResult.success || !solveResult.data) {
-        setError(solveResult.error || 'Failed to solve simulation');
-        setIsComputing(false);
-        setStatus(SimulationStatus.ERROR);
-        return;
-      }
+  const handleStepForward = useCallback(() => {
+    playback.stepForward();
+  }, [playback]);
 
-      // Store complete solution and reset playback
-      setCompleteSolution(solveResult.data);
-      setCurrentTimeIndex(0);
-      setIsPlaying(false);
-      setStatus(SimulationStatus.COMPLETED);
-      setIsComputing(false);
+  const handleStepBackward = useCallback(() => {
+    playback.stepBackward();
+  }, [playback]);
 
-      console.log('[App] Simulation solved successfully:', solveResult.data.simulation_id);
-    } catch (err) {
-      console.error('[App] Error applying configuration:', err);
-      setError(err instanceof Error ? err.message : 'Unknown error occurred');
-      setIsComputing(false);
-      setStatus(SimulationStatus.ERROR);
-    }
-  };
+  const handleSpeedChange = useCallback((speed: number) => {
+    playback.setSpeed(speed);
+  }, [playback]);
 
-  // ============================================================
-  // PLAYBACK CONTROL HANDLERS (Client-Side Only)
-  // ============================================================
-
-  /**
-   * Play animation from current frame
-   * Restarts from frame 0 if at end
-   */
-  const handlePlay = () => {
-    if (!completeSolution) return;
-
-    // If at end, restart from beginning
-    if (currentTimeIndex >= completeSolution.metadata.nt - 1) {
-      setCurrentTimeIndex(0);
-    }
-
-    setIsPlaying(true);
-    setStatus(SimulationStatus.RUNNING);
-  };
-
-  /**
-   * Pause animation at current frame
-   */
-  const handlePause = () => {
-    setIsPlaying(false);
-    setStatus(SimulationStatus.PAUSED);
-  };
-
-  /**
-   * Reset to frame 0 without clearing solution
-   * Allows instant replay without re-computation
-   */
-  const handleReset = () => {
-    console.log('[App] Resetting to frame 0');
-    setIsPlaying(false);
-    setCurrentTimeIndex(0);
-    setStatus(SimulationStatus.COMPLETED);
-  };
-
-  /**
-   * Jump to specific time frame
-   *
-   * @param timeIndex - Time step index to seek to
-   */
-  const handleSeek = (timeIndex: number) => {
-    console.log('[App] Seeking to time step:', timeIndex);
-
-    if (!completeSolution) return;
-
-    const clamped = Math.max(0, Math.min(timeIndex, completeSolution.metadata.nt - 1));
-    setCurrentTimeIndex(clamped);
-  };
-
-  /**
-   * Step forward one frame
-   */
-  const handleStepForward = () => {
-    if (!completeSolution) return;
-
-    setCurrentTimeIndex(prev =>
-      Math.min(prev + 1, completeSolution.metadata.nt - 1)
-    );
-  };
-
-  /**
-   * Step backward one frame
-   */
-  const handleStepBackward = () => {
-    setCurrentTimeIndex(prev => Math.max(prev - 1, 0));
-  };
-
-  /**
-   * Change playback speed
-   *
-   * @param speed - Speed multiplier (0.5, 1.0, 2.0, etc.)
-   */
-  const handleSpeedChange = (speed: number) => {
-    console.log('[App] Playback speed changed to:', speed);
-    setPlaybackSpeed(speed);
-  };
-
-  // ============================================================
-  // PRESET HANDLERS
-  // ============================================================
-
-  /**
-   * Handles preset selection
-   * Loads preset configuration into the form
-   *
-   * @param presetConfig - Configuration from the selected preset
-   */
-  const handlePresetSelect = (presetConfig: SimulationConfig) => {
-    console.log('[App] Preset selected');
+  const handlePresetSelect = useCallback((presetConfig: SimulationConfig) => {
     setConfig(presetConfig);
-
-    // Reset solution if one exists
     if (completeSolution) {
-      setCompleteSolution(null);
-      setCurrentTimeIndex(0);
-      setIsPlaying(false);
-      setStatus(SimulationStatus.IDLE);
+      simulation.clearSolution();
+      playback.reset();
     }
-  };
+  }, [completeSolution, simulation, playback]);
 
-  // ============================================================
-  // VISUALIZATION MODE HANDLERS
-  // ============================================================
-
-  /**
-   * Handles visualization mode change
-   *
-   * @param newMode - New visualization mode
-   */
-  const handleVisualizationModeChange = (newMode: VisualizationMode) => {
-    console.log('[App] Visualization mode changed:', newMode);
+  const handleVisualizationModeChange = useCallback((newMode: VisualizationMode) => {
     setVizMode(newMode);
-  };
+  }, []);
 
-  // ============================================================
-  // RENDER
-  // ============================================================
+  const handleClearError = useCallback(() => {
+    simulation.clearError();
+  }, [simulation]);
+
+  const partialTimeSliceSize = useMemo(
+    () => Math.min(15, Math.floor(totalTimeSteps / 10)),
+    [totalTimeSteps]
+  );
 
   return (
     <div className="app">
-      {/* Header */}
       <header className="app-header">
         <h1>PDE Simulation Platform</h1>
         <p className="app-subtitle">
@@ -437,38 +160,28 @@ export const App: React.FC = () => {
         </p>
       </header>
 
-      {/* Error Banner */}
       {error && (
         <div className="error-banner">
           <span className="error-icon">⚠</span>
           <span className="error-message">{error}</span>
-          <button className="error-close" onClick={() => setError(null)}>
-            ✕
-          </button>
+          <button className="error-close" onClick={handleClearError}>✕</button>
         </div>
       )}
 
-      {/* Loading Overlay */}
-      {(isComputing) && (
+      {isComputing && (
         <div className="loading-overlay">
           <div className="spinner"></div>
           <p>Computing simulation...</p>
         </div>
       )}
 
-      {/* Main Content */}
       <div className="app-content">
-        {/* Left Panel: Configuration */}
         <aside className="sidebar-left">
           <div className="sidebar-section">
-            <PresetSelector
-              onPresetSelect={handlePresetSelect}
-              displayMode="dropdown"
-            />
+            <PresetSelector onPresetSelect={handlePresetSelect} displayMode="dropdown" />
           </div>
-
           <div className="sidebar-section sidebar-parameters">
-            <ParameterPanel
+            <MemoizedParameterPanel
               config={config}
               onChange={setConfig}
               onApply={handleApplyConfiguration}
@@ -476,8 +189,6 @@ export const App: React.FC = () => {
               onValidationChange={setHasValidationErrors}
             />
           </div>
-
-          {/* Fixed Apply Configuration Button */}
           <div className="sidebar-apply-button">
             <button
               className="btn-apply-fixed"
@@ -490,9 +201,7 @@ export const App: React.FC = () => {
           </div>
         </aside>
 
-        {/* Center Panel: Visualization */}
         <main className="main-content">
-          {/* Visualization Mode Selector */}
           <div className="viz-mode-selector">
             <button
               className={`viz-mode-btn ${vizMode === VisualizationMode.LINE_2D ? 'active' : ''}`}
@@ -525,16 +234,14 @@ export const App: React.FC = () => {
               className={`viz-mode-btn ${vizMode === VisualizationMode.GRID ? 'active' : ''}`}
               onClick={() => handleVisualizationModeChange(VisualizationMode.GRID)}
               disabled={!currentData}
-              title="Interactive 3x2 grid - drag panels to rearrange • 6 visualization types"
+              title="Interactive 3x2 grid - drag panels to rearrange"
             >
-              📊 3x2 Grid (Interactive)
+              3x2 Grid (Interactive)
             </button>
           </div>
 
-          {/* Visualization */}
           <div className={`visualization-container ${vizMode === VisualizationMode.GRID ? 'grid-mode' : ''}`}>
             {vizMode === VisualizationMode.SURFACE_3D ? (
-              // Enhanced 3D Viewer with complete/partial toggle
               <Enhanced3DViewer
                 currentData={currentData}
                 allData={allData}
@@ -545,10 +252,9 @@ export const App: React.FC = () => {
                 globalMax={completeSolution?.metadata.global_max}
                 useFixedAxes={true}
                 showGrid={true}
-                partialTimeSliceSize={Math.min(15, Math.floor(totalTimeSteps / 10))}
+                partialTimeSliceSize={partialTimeSliceSize}
               />
             ) : vizMode === VisualizationMode.GRID ? (
-              // Interactive 3x2 Grid Visualization
               <DraggableGridVisualization
                 currentData={currentData}
                 allData={allData}
@@ -561,8 +267,7 @@ export const App: React.FC = () => {
                 totalTimeSteps={totalTimeSteps}
               />
             ) : (
-              // Standard single visualization
-              <VisualizationCanvas
+              <MemoizedVisualizationCanvas
                 currentData={currentData}
                 allData={allData}
                 mode={vizMode}
@@ -575,15 +280,14 @@ export const App: React.FC = () => {
             )}
           </div>
 
-          {/* Controls */}
           <div className="controls-container">
-            <SimulationControls
+            <MemoizedSimulationControls
               status={status}
               currentTimeStep={currentTimeIndex}
               totalTimeSteps={totalTimeSteps}
               currentTime={currentTime}
               maxTime={maxTime}
-              hasSolution={completeSolution !== null}
+              hasSolution={hasSolution}
               onPlay={handlePlay}
               onPause={handlePause}
               onReset={handleReset}
@@ -595,7 +299,6 @@ export const App: React.FC = () => {
             />
           </div>
 
-          {/* Info Panel */}
           <div className="info-panel">
             <div className="info-item">
               <span className="info-label">Equation:</span>
@@ -623,7 +326,6 @@ export const App: React.FC = () => {
         </main>
       </div>
 
-      {/* Footer */}
       <footer className="app-footer">
         <p>
           PDE Simulation Platform | Built with React + TypeScript + FastAPI |{' '}
@@ -633,7 +335,6 @@ export const App: React.FC = () => {
         </p>
       </footer>
 
-      {/* Performance Overlay (Development Mode) */}
       <PerformanceOverlay enabled={process.env.NODE_ENV === 'development'} />
     </div>
   );

@@ -26,10 +26,11 @@ export interface OptimizationConfig {
 
 /**
  * Default optimization settings
+ * @deprecated Prefer OPTIMIZATION_PRESETS.highPerformance directly.
  */
 export const DEFAULT_OPTIMIZATION_CONFIG: OptimizationConfig = {
   renderMode: 'webgl',
-  enableVirtualWebGL: false, // Will be enabled if needed
+  enableVirtualWebGL: false,
   scatterGLMode: true,
   heatmapGLMode: true,
   disableAnimations: false,
@@ -38,44 +39,48 @@ export const DEFAULT_OPTIMIZATION_CONFIG: OptimizationConfig = {
   enableBuffering: true
 };
 
+/** Shared base fields applied to all presets */
+const BASE_PRESET = {
+  reduceDataPoints: false,
+  enableBuffering: true
+} as const;
+
 /**
- * Optimization presets for different scenarios
+ * Optimization presets for different scenarios.
+ * Choose a preset based on detected hardware (see getRecommendedPreset).
  */
 export const OPTIMIZATION_PRESETS = {
-  // Best performance on lower-end hardware
+  /** Best performance on lower-end / no-WebGL hardware */
   low: {
+    ...BASE_PRESET,
     renderMode: 'svg' as RenderMode,
     enableVirtualWebGL: false,
     scatterGLMode: false,
     heatmapGLMode: false,
     disableAnimations: true,
-    reduceDataPoints: true,
-    maxDataPoints: 10000,
-    enableBuffering: true
+    maxDataPoints: 10000
   },
 
-  // Balanced performance
+  /** Balanced performance – scatter GL on, heatmap stays CPU-rendered */
   balanced: {
+    ...BASE_PRESET,
     renderMode: 'auto' as RenderMode,
     enableVirtualWebGL: false,
     scatterGLMode: true,
     heatmapGLMode: false,
     disableAnimations: false,
-    reduceDataPoints: false,
-    maxDataPoints: 50000,
-    enableBuffering: true
+    maxDataPoints: 50000
   },
 
-  // Maximum performance with GPU acceleration
+  /** Maximum GPU acceleration; enables Virtual WebGL for multi-plot pages */
   highPerformance: {
+    ...BASE_PRESET,
     renderMode: 'webgl' as RenderMode,
-    enableVirtualWebGL: true, // Enable Virtual WebGL for multiple plots
+    enableVirtualWebGL: true,
     scatterGLMode: true,
     heatmapGLMode: true,
     disableAnimations: false,
-    reduceDataPoints: false,
-    maxDataPoints: 1000000,
-    enableBuffering: true
+    maxDataPoints: 1000000
   }
 };
 
@@ -140,24 +145,23 @@ export const getRecommendedPreset = (): OptimizationConfig => {
 };
 
 /**
- * Plotly configuration object for WebGL optimization
+ * Plotly configuration object for WebGL optimization.
+ * @deprecated Use BASE_PLOTLY_CONFIG from utils/plotlyConfig.ts directly.
+ * This wrapper is kept for backwards compatibility with legacy call sites.
  */
 export const getOptimizedPlotlyConfig = (
-  config: OptimizationConfig
-): Partial<Plotly.Config> => {
-  return {
-    responsive: true,
-    displayModeBar: true,
-    displaylogo: false,
-    modeBarButtonsToRemove: ['select2d', 'lasso2d'],
-    // WebGL rendering mode
-    toImageButtonOptions: {
-      format: 'webp',
-      width: 1200,
-      height: 800
-    }
-  };
-};
+  _config: OptimizationConfig
+): Partial<Plotly.Config> => ({
+  responsive: true,
+  displayModeBar: true,
+  displaylogo: false,
+  modeBarButtonsToRemove: ['select2d', 'lasso2d'],
+  toImageButtonOptions: {
+    format: 'webp',
+    width: 1200,
+    height: 800
+  }
+});
 
 /**
  * Plotly layout configuration for optimization

@@ -135,7 +135,7 @@ export const Enhanced3DViewer: React.FC<Enhanced3DViewerProps> = ({
               id="time-slice-slider"
               type="range"
               min="5"
-              max="Math.min(50, totalTimeSteps / 2)"
+              max={Math.min(50, totalTimeSteps / 2)}
               value={sliceSize}
               onChange={(e) => setSliceSize(parseInt(e.target.value))}
               className="time-slice-slider"

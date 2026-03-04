@@ -4,13 +4,18 @@ Simulation service for managing simulation lifecycle.
 from typing import Dict, Any, Optional
 import uuid
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 import numpy as np
 import time
 
-from app.models.schemas import SimulationConfig, SimulationStatus
+from app.models.schemas import SimulationConfig
 from app.core.pde_simulator import PDESimulator
 from app.core.stability_validator import StabilityValidator
+from app.config import (
+    STREAMING_FRAME_DELAY,
+    PAUSE_POLL_INTERVAL,
+    MAX_GRID_POINTS,
+)
 
 
 class SimulationService:
@@ -21,8 +26,46 @@ class SimulationService:
 
     def __init__(self):
         """Initialize simulation service."""
-        self.active_simulations: dict[str, dict[str, None]] = {}
+        self.active_simulations: Dict[str, Dict[str, Any]] = {}
         self.stability_validator = StabilityValidator()
+
+    def _check_grid_size(self, config: SimulationConfig) -> Optional[Dict[str, Any]]:
+        """
+        Guard against grids that are too large to process safely.
+
+        Returns an error dict if the grid exceeds MAX_GRID_POINTS, else None.
+        """
+        nx = round((config.spatial_domain.x_max - config.spatial_domain.x_min) / config.spatial_domain.dx) + 1
+        nt = round((config.temporal_domain.t_max - config.temporal_domain.t_min) / config.temporal_domain.dt) + 1
+
+        if nx <= 0 or nt <= 0:
+            return {
+                "valid": False,
+                "errors": ["Grid dimensions must be positive. Check x_min < x_max and t_min < t_max."],
+                "sigma": None,
+            }
+
+        if nx > MAX_GRID_POINTS:
+            return {
+                "valid": False,
+                "errors": [
+                    f"Spatial grid too large: nx={nx} exceeds maximum of {MAX_GRID_POINTS}. "
+                    "Increase dx or reduce the x domain."
+                ],
+                "sigma": None,
+            }
+
+        if nt > MAX_GRID_POINTS:
+            return {
+                "valid": False,
+                "errors": [
+                    f"Temporal grid too large: nt={nt} exceeds maximum of {MAX_GRID_POINTS}. "
+                    "Increase dt or reduce the t domain."
+                ],
+                "sigma": None,
+            }
+
+        return None
 
     def create_simulation(self, config: SimulationConfig) -> str:
         """
@@ -45,7 +88,7 @@ class SimulationService:
             "config": config,
             "simulator": simulator,
             "status": "created",
-            "created_at": datetime.utcnow(),
+            "created_at": datetime.now(timezone.utc),
             "progress": 0.0
         }
 
@@ -61,6 +104,11 @@ class SimulationService:
         Returns:
             Validation results
         """
+        # Reject zero-sized or oversized grids before anything else.
+        grid_error = self._check_grid_size(config)
+        if grid_error:
+            return grid_error
+
         # Check parameter ranges first
         range_check = self.stability_validator.check_parameter_ranges(config.model_dump())
         if not range_check["valid"]:
@@ -127,6 +175,9 @@ class SimulationService:
         """
         Execute a simulation (async generator for streaming).
 
+        LEGACY: Used by the WebSocket streaming path.  New code should call
+        solve_complete_simulation() instead.
+
         Args:
             simulation_id: Simulation ID
 
@@ -143,48 +194,51 @@ class SimulationService:
         # Update status
         sim["status"] = "running"
 
-        # Get complete solution
-        solution = simulator.solve()  # shape: (nt, nx)
+        # Get complete solution — shape: (nt, nx), kept as numpy array throughout
+        solution: np.ndarray = simulator.solve()
         nt, nx = solution.shape
 
-        # Create x array
-        x_values = np.linspace(
+        # Compute x coordinates once; reused for every yielded frame
+        x_values: list[float] = np.linspace(
             config.spatial_domain.x_min,
             config.spatial_domain.x_max,
-            nx
+            nx,
+            dtype=np.float64,
         ).tolist()
+
+        # Pre-compute per-row min/max to avoid redundant full-array scans
+        row_min: np.ndarray = solution.min(axis=1)
+        row_max: np.ndarray = solution.max(axis=1)
 
         # Stream each time step
         for time_index in range(nt):
             # Check if paused/stopped
             if sim["status"] == "paused":
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(PAUSE_POLL_INTERVAL)
                 continue
             if sim["status"] == "stopped":
                 break
 
-            # Extract solution at this time step
-            u_values = solution[time_index, :].tolist()
             time_value = config.temporal_domain.t_min + time_index * config.temporal_domain.dt
 
             # Update progress
             sim["progress"] = (time_index + 1) / nt
 
-            # Yield data packet
+            # Yield data packet — convert row to list only when yielding
             yield {
                 "simulation_id": simulation_id,
                 "time_index": time_index,
                 "time_value": time_value,
                 "x_values": x_values,
-                "u_values": u_values,
+                "u_values": solution[time_index].tolist(),
                 "metadata": {
-                    "max_value": float(np.max(solution[time_index, :])),
-                    "min_value": float(np.min(solution[time_index, :]))
+                    "max_value": float(row_max[time_index]),
+                    "min_value": float(row_min[time_index]),
                 }
             }
 
-            # Control streaming speed (50 fps)
-            await asyncio.sleep(0.02)
+            # Control streaming speed using centralised constant (50 fps)
+            await asyncio.sleep(STREAMING_FRAME_DELAY)
 
         # Mark as completed
         sim["status"] = "completed"
@@ -221,42 +275,47 @@ class SimulationService:
         Returns:
             Dictionary with x_values, t_values, u_values, and metadata
         """
-        start_time = time.time()
+        start_time = time.perf_counter()
 
-        # Create simulator and solve
+        # Create simulator and solve — returns (nt, nx) C-contiguous numpy array
         simulator = PDESimulator(config.model_dump())
-        solution = simulator.solve()  # Returns (nt, nx) numpy array
+        solution: np.ndarray = simulator.solve()
 
-        computation_time_ms = (time.time() - start_time) * 1000
+        computation_time_ms = (time.perf_counter() - start_time) * 1000
 
         # Extract dimensions
         nt, nx = solution.shape
 
-        # Compute global bounds
-        global_min = float(np.min(solution))
-        global_max = float(np.max(solution))
+        # Compute global bounds in a single pass (no copies)
+        global_min = float(solution.min())
+        global_max = float(solution.max())
 
-        # Build coordinate arrays
-        x_values = np.linspace(
+        # Build coordinate arrays — dtype float64 avoids implicit casting later
+        x_values: list[float] = np.linspace(
             config.spatial_domain.x_min,
             config.spatial_domain.x_max,
-            nx
+            nx,
+            dtype=np.float64,
         ).tolist()
 
-        t_values = np.linspace(
+        t_values: list[float] = np.linspace(
             config.temporal_domain.t_min,
             config.temporal_domain.t_max,
-            nt
+            nt,
+            dtype=np.float64,
         ).tolist()
 
-        # Convert solution to list
-        u_values = solution.tolist()
+        # Convert solution to nested list — tolist() on a numpy array is the
+        # fastest path; it avoids Python-level row iteration.
+        u_values: list[list[float]] = solution.tolist()
 
         # Calculate stability parameter
         if config.equation_type == "heat":
-            sigma = (config.physical_parameters.beta or 0.1) * config.temporal_domain.dt / (config.spatial_domain.dx ** 2)
+            beta = config.physical_parameters.beta or 0.1
+            sigma = beta * config.temporal_domain.dt / (config.spatial_domain.dx ** 2)
         elif config.equation_type == "wave":
-            sigma = ((config.physical_parameters.c or 1.0) * config.temporal_domain.dt / config.spatial_domain.dx) ** 2
+            c = config.physical_parameters.c or 1.0
+            sigma = (c * config.temporal_domain.dt / config.spatial_domain.dx) ** 2
         else:
             sigma = 0.0
 
@@ -270,6 +329,6 @@ class SimulationService:
                 "nx": nx,
                 "nt": nt,
                 "computation_time_ms": computation_time_ms,
-                "stability_parameter": sigma
+                "stability_parameter": sigma,
             }
         }

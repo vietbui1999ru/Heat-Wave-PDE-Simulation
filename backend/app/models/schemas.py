@@ -55,9 +55,16 @@ class SpatialDiscretization(BaseModel):
 
     @field_validator('dx')
     @classmethod
-    def validate_dx(cls, v, info):
+    def validate_dx(cls, v):
         if v <= 0:
             raise ValueError("dx must be positive")
+        return v
+
+    @field_validator('x_max')
+    @classmethod
+    def validate_domain(cls, v, info):
+        if info.data.get('x_min') is not None and v <= info.data['x_min']:
+            raise ValueError("x_max must be greater than x_min")
         return v
 
 
@@ -69,16 +76,23 @@ class TemporalDiscretization(BaseModel):
 
     @field_validator('dt')
     @classmethod
-    def validate_dt(cls, v, info):
+    def validate_dt(cls, v):
         if v <= 0:
             raise ValueError("dt must be positive")
+        return v
+
+    @field_validator('t_max')
+    @classmethod
+    def validate_domain(cls, v, info):
+        if info.data.get('t_min') is not None and v <= info.data['t_min']:
+            raise ValueError("t_max must be greater than t_min")
         return v
 
 
 class PhysicalParameters(BaseModel):
     """Physical parameters for the equation."""
-    beta: Optional[float] = Field(None, description="Thermal diffusivity (heat equation)")
-    c: Optional[float] = Field(None, description="Wave speed (wave equation)")
+    beta: Optional[float] = Field(None, description="Thermal diffusivity (heat equation)", gt=0)
+    c: Optional[float] = Field(None, description="Wave speed (wave equation)", gt=0)
 
 
 class SimulationConfig(BaseModel):
